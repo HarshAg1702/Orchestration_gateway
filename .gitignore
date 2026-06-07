@@ -1,0 +1,19 @@
+# Binaries
+gateway
+*.exe
+*.test
+
+# Config overrides
+configs/*.local.env
+.env
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Go
+vendor/
