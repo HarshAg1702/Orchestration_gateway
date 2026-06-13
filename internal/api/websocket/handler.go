@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,11 +17,34 @@ import (
 	"github.com/harshagae/orchestration-gateway/internal/limiter"
 	"github.com/harshagae/orchestration-gateway/internal/metrics"
 	"github.com/harshagae/orchestration-gateway/internal/models"
+	"github.com/harshagae/orchestration-gateway/internal/queue"
 	roundrobin "github.com/harshagae/orchestration-gateway/internal/router/round_robin"
 )
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// safeConn wraps a websocket.Conn with a mutex to allow concurrent writes.
+type safeConn struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+func (sc *safeConn) send(resp models.ChatResponse) {
+	b, _ := json.Marshal(resp)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	_ = sc.conn.WriteMessage(websocket.TextMessage, b)
+}
+
+func (sc *safeConn) read() ([]byte, error) {
+	_, msg, err := sc.conn.ReadMessage()
+	return msg, err
+}
+
+func (sc *safeConn) close() {
+	sc.conn.Close()
 }
 
 type Handler struct {
@@ -29,6 +53,7 @@ type Handler struct {
 	embedder *embeddings.Service
 	router   *roundrobin.Router
 	limiter  *limiter.Limiter
+	queue    *queue.Queue
 }
 
 func NewHandler(
@@ -37,6 +62,7 @@ func NewHandler(
 	embedder *embeddings.Service,
 	router *roundrobin.Router,
 	lim *limiter.Limiter,
+	q *queue.Queue,
 ) *Handler {
 	return &Handler{
 		redis:    redis,
@@ -44,6 +70,7 @@ func NewHandler(
 		embedder: embedder,
 		router:   router,
 		limiter:  lim,
+		queue:    q,
 	}
 }
 
@@ -55,19 +82,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.limiter.Acquire(r)
 	defer h.limiter.Release(r)
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	raw, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("ws upgrade failed", "err", err)
 		return
 	}
-	defer conn.Close()
+	conn := &safeConn{conn: raw}
+	defer conn.close()
 
 	metrics.ActiveConnections.Inc()
 	defer metrics.ActiveConnections.Dec()
 	slog.Info("websocket connection opened", "remote_addr", r.RemoteAddr)
 
 	for {
-		_, msg, err := conn.ReadMessage()
+		msg, err := conn.read()
 		if err != nil {
 			break
 		}
@@ -75,16 +103,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var req models.ChatRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
 			slog.Warn("invalid request payload", "raw", string(msg), "err", err)
-			h.send(conn, models.ChatResponse{Error: "invalid request", Done: true})
+			conn.send(models.ChatResponse{Error: "invalid request", Done: true})
 			continue
 		}
 
 		slog.Info("prompt received", "message", req.Message, "remote_addr", r.RemoteAddr)
-		h.handle(conn, r, req)
+
+		reqCopy := req
+		rCopy := r
+
+		err = h.queue.Submit(queue.Job{
+			Execute: func() { h.handle(conn, rCopy, reqCopy) },
+		})
+		if err != nil {
+			slog.Warn("[handler] backpressure — queue full, rejecting request", "remote_addr", r.RemoteAddr, "message", req.Message)
+			conn.send(models.ChatResponse{Error: "server busy, try again later", Done: true})
+		}
 	}
 }
 
-func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatRequest) {
+func (h *Handler) handle(conn *safeConn, r *http.Request, req models.ChatRequest) {
 	start := time.Now()
 	ctx := r.Context()
 
@@ -97,7 +135,7 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 		slog.Info("[handler] L1 hit — returning cached response", "model", cached.Model, "latency_ms", time.Since(start).Milliseconds())
 		metrics.CacheHitsTotal.WithLabelValues("redis").Inc()
 		metrics.RequestLatency.WithLabelValues("redis").Observe(time.Since(start).Seconds())
-		h.send(conn, models.ChatResponse{Token: cached.Response, Done: true, Source: "redis", Model: cached.Model})
+		conn.send(models.ChatResponse{Token: cached.Response, Done: true, Source: "redis", Model: cached.Model})
 		return
 	}
 	slog.Info("[handler] L1 miss — proceeding to L2 cache (qdrant)")
@@ -114,7 +152,7 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 			slog.Info("[handler] L2 hit — returning cached response", "model", model, "latency_ms", time.Since(start).Milliseconds())
 			metrics.CacheHitsTotal.WithLabelValues("qdrant").Inc()
 			metrics.RequestLatency.WithLabelValues("qdrant").Observe(time.Since(start).Seconds())
-			h.send(conn, models.ChatResponse{Token: response, Done: true, Source: "qdrant", Model: model})
+			conn.send(models.ChatResponse{Token: response, Done: true, Source: "qdrant", Model: model})
 			_ = h.redis.Set(ctx, req.Message, &models.CachedResponse{Response: response, Model: model})
 			return
 		}
@@ -128,7 +166,7 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 	provider, err := h.router.Next()
 	if err != nil {
 		slog.Error("[handler] no healthy provider available", "err", err)
-		h.send(conn, models.ChatResponse{Error: "no healthy provider available", Done: true})
+		conn.send(models.ChatResponse{Error: "no healthy provider available", Done: true})
 		return
 	}
 	slog.Info("[handler] streaming from provider", "provider", provider.Name())
@@ -153,11 +191,11 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 			ttftRecorded = true
 		}
 		fullResponse.WriteString(token)
-		h.send(conn, models.ChatResponse{Token: token, Model: provider.Name()})
+		conn.send(models.ChatResponse{Token: token, Model: provider.Name()})
 	}
 
 	slog.Info("[handler] stream complete", "provider", provider.Name(), "total_latency_ms", time.Since(start).Milliseconds())
-	h.send(conn, models.ChatResponse{Done: true, Source: "model", Model: provider.Name()})
+	conn.send(models.ChatResponse{Done: true, Source: "model", Model: provider.Name()})
 	metrics.RequestLatency.WithLabelValues("model").Observe(time.Since(start).Seconds())
 
 	// Populate caches asynchronously — only if we got a real response
@@ -190,9 +228,4 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 			slog.Warn("[handler] skipping qdrant store — no embedding available (nomic-embed-text not loaded?)")
 		}
 	}()
-}
-
-func (h *Handler) send(conn *websocket.Conn, resp models.ChatResponse) {
-	b, _ := json.Marshal(resp)
-	_ = conn.WriteMessage(websocket.TextMessage, b)
 }
