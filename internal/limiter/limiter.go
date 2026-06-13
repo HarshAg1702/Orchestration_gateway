@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -24,19 +25,27 @@ func New(maxConnections, maxPerIP int) *Limiter {
 }
 
 func (l *Limiter) Allow(r *http.Request) bool {
-	if l.active.Load() >= l.maxConnections {
+	ip := r.RemoteAddr
+	active := l.active.Load()
+
+	slog.Info("[limiter] checking connection", "ip", ip, "active_connections", active, "max_connections", l.maxConnections)
+
+	if active >= l.maxConnections {
+		slog.Warn("[limiter] rejected — global limit reached", "ip", ip, "active", active, "max", l.maxConnections)
 		return false
 	}
 
-	ip := r.RemoteAddr
 	l.mu.Lock()
-	if l.ipCount[ip] >= l.maxPerIP {
+	ipActive := l.ipCount[ip]
+	if ipActive >= l.maxPerIP {
 		l.mu.Unlock()
+		slog.Warn("[limiter] rejected — per-IP limit reached", "ip", ip, "ip_active", ipActive, "max_per_ip", l.maxPerIP)
 		return false
 	}
 	l.ipCount[ip]++
 	l.mu.Unlock()
 
+	slog.Info("[limiter] connection allowed", "ip", ip)
 	return true
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,6 +46,8 @@ type SearchResult struct {
 }
 
 func (c *Cache) Search(ctx context.Context, embedding []float32) (string, string, error) {
+	slog.Info("[qdrant] searching semantic cache", "collection", c.collection, "threshold", c.threshold)
+
 	sr := SearchRequest{
 		Vector:         embedding,
 		Limit:          3,
@@ -56,33 +59,39 @@ func (c *Cache) Search(ctx context.Context, embedding []float32) (string, string
 	url := fmt.Sprintf("%s/collections/%s/points/search", c.baseURL, c.collection)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
+		slog.Error("[qdrant] failed to build search request", "err", err)
 		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		slog.Error("[qdrant] search http request failed", "err", err)
 		return "", "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		rb, _ := io.ReadAll(resp.Body)
+		slog.Error("[qdrant] non-200 response", "status", resp.StatusCode, "body", string(rb))
 		return "", "", fmt.Errorf("qdrant search: status %d: %s", resp.StatusCode, string(rb))
 	}
 
 	var result SearchResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Error("[qdrant] failed to decode search response", "err", err)
 		return "", "", err
 	}
 
 	if len(result.Result) == 0 {
+		slog.Info("[qdrant] cache miss — no results above threshold")
 		return "", "", nil
 	}
 
 	payload := result.Result[0].Payload
 	response, _ := payload["response"].(string)
 	model, _ := payload["model"].(string)
+	slog.Info("[qdrant] cache hit", "score", result.Result[0].Score, "model", model)
 	return response, model, nil
 }
 
@@ -97,6 +106,7 @@ type Point struct {
 }
 
 func (c *Cache) Store(ctx context.Context, embedding []float32, prompt, response, model string) error {
+	slog.Info("[qdrant] storing response", "collection", c.collection, "model", model, "prompt", prompt)
 	pt := Point{
 		ID:     uuid.New().String(),
 		Vector: embedding,

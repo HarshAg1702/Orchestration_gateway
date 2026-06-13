@@ -1,6 +1,7 @@
 package roundrobin
 
 import (
+	"log/slog"
 	"sync/atomic"
 
 	"github.com/harshagae/orchestration-gateway/internal/providers/interfaces"
@@ -17,5 +18,7 @@ func New(providers []interfaces.Provider) *Router {
 
 func (r *Router) Next() interfaces.Provider {
 	n := r.counter.Add(1)
-	return r.providers[(n-1)%uint64(len(r.providers))]
+	selected := r.providers[(n-1)%uint64(len(r.providers))]
+	slog.Info("[router] provider selected", "provider", selected.Name(), "request_count", n)
+	return selected
 }
