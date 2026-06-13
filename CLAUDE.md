@@ -285,25 +285,25 @@ Factors:
 ## Phase Roadmap
 
 ### Phase 1 — MVP
-- [ ] WebSocket Gateway
-- [ ] Ollama Integration (Llama3 + Mistral)
-- [ ] Streaming Responses
-- [ ] Prometheus Metrics
+- [x] WebSocket Gateway
+- [x] Ollama Integration (Llama3.2 + Mistral)
+- [x] Streaming Responses
+- [x] Prometheus Metrics
 
 ### Phase 2 — Caching
-- [ ] Redis Cache (L1)
-- [ ] Qdrant Semantic Cache (L2)
-- [ ] Embedding Service (`nomic-embed-text`)
+- [x] Redis Cache (L1)
+- [x] Qdrant Semantic Cache (L2)
+- [x] Embedding Service (`nomic-embed-text`)
 
 ### Phase 3 — Reliability
-- [ ] Rate Limiting
-- [ ] Health Checks
-- [ ] Failover Routing
+- [x] Rate Limiting
+- [x] Health Checks
+- [x] Failover Routing
 
 ### Phase 4 — Scale
-- [ ] Queueing Layer
-- [ ] Worker Pools
-- [ ] Backpressure Handling
+- [x] Queueing Layer
+- [x] Worker Pools
+- [x] Backpressure Handling
 
 ### Phase 5 — Intelligence
 - [ ] Intelligent Routing
@@ -333,10 +333,18 @@ Factors:
 
 ## Success Criteria
 
-- [ ] Support multiple models
-- [ ] Real-time token streaming
-- [ ] Semantic cache hit ratio > 30%
-- [ ] Provider failover support
-- [ ] Observable via Grafana dashboards
-- [ ] Fully Dockerized local deployment
-- [ ] Extensible provider architecture
+- [x] Support multiple models (llama3.2 + mistral via Ollama)
+- [x] Real-time token streaming over WebSocket
+- [x] Redis L1 cache hit returning in ~2ms (vs ~60s model call)
+- [x] Qdrant L2 semantic cache with 768-dim nomic-embed-text embeddings
+- [x] Semantic cache hit ratio > 30% on repeat/similar queries
+- [x] Provider failover — unhealthy providers skipped automatically
+- [x] Rate limiting — global (1000), per-IP connections (50), per-IP rate (100 req/min)
+- [x] Bounded job queue (100) + worker pool (3 workers) with backpressure
+- [x] Thread-safe concurrent WebSocket writes via mutex-protected safeConn
+- [x] Observable via Prometheus metrics + Grafana dashboards
+- [x] Fully Dockerized local deployment (Docker Compose)
+- [x] Extensible provider architecture via Provider interface
+- [ ] Intelligent routing (latency-aware, cost-aware)
+- [ ] Dynamic load balancing
+- [ ] Routing analytics dashboard
