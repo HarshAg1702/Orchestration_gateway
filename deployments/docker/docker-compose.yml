@@ -49,7 +49,9 @@ services:
     environment:
       - OLLAMA_URL=http://ollama:11434
       - REDIS_ADDR=redis:6379
-      - QDRANT_ADDR=qdrant:6334
+      - QDRANT_ADDR=qdrant:6333
+      - LLAMA_MODEL=llama3.2
+      - MISTRAL_MODEL=llama3.2
     depends_on:
       - redis
       - qdrant

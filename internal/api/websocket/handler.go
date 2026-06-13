@@ -160,16 +160,34 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 	h.send(conn, models.ChatResponse{Done: true, Source: "model", Model: provider.Name()})
 	metrics.RequestLatency.WithLabelValues("model").Observe(time.Since(start).Seconds())
 
-	// Populate caches asynchronously
+	// Populate caches asynchronously — only if we got a real response
 	complete := fullResponse.String()
+	if complete == "" {
+		slog.Warn("[handler] skipping cache store — empty response from provider", "provider", provider.Name())
+		return
+	}
+
 	slog.Info("[handler] populating caches async", "provider", provider.Name(), "response_length", len(complete))
 	go func() {
 		storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
 		cr := &models.CachedResponse{Response: complete, Model: provider.Name()}
-		_ = h.redis.Set(storeCtx, req.Message, cr)
+
+		if err := h.redis.Set(storeCtx, req.Message, cr); err != nil {
+			slog.Error("[handler] failed to store in redis", "err", err)
+		} else {
+			slog.Info("[handler] stored in redis (L1)", "model", provider.Name())
+		}
+
 		if embedding != nil {
-			_ = h.qdrant.Store(storeCtx, embedding, req.Message, complete, provider.Name())
+			if err := h.qdrant.Store(storeCtx, embedding, req.Message, complete, provider.Name()); err != nil {
+				slog.Error("[handler] failed to store in qdrant", "err", err)
+			} else {
+				slog.Info("[handler] stored in qdrant (L2)", "model", provider.Name())
+			}
+		} else {
+			slog.Warn("[handler] skipping qdrant store — no embedding available (nomic-embed-text not loaded?)")
 		}
 	}()
 }
