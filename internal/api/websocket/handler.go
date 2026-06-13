@@ -125,7 +125,12 @@ func (h *Handler) handle(conn *websocket.Conn, r *http.Request, req models.ChatR
 	slog.Info("[handler] cache miss — selecting provider via router")
 	metrics.CacheMissesTotal.Inc()
 
-	provider := h.router.Next()
+	provider, err := h.router.Next()
+	if err != nil {
+		slog.Error("[handler] no healthy provider available", "err", err)
+		h.send(conn, models.ChatResponse{Error: "no healthy provider available", Done: true})
+		return
+	}
 	slog.Info("[handler] streaming from provider", "provider", provider.Name())
 	tokenCh := make(chan string, 64)
 
